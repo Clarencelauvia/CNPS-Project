@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Bienvenue chez CNPS ARENA</title>
+    <title>Bienvenue chez CNPS LODGE</title>
     <style>
         body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
         .container { max-width: 600px; margin: 0 auto; padding: 20px; }
@@ -15,7 +15,7 @@
 <body>
     <div class="container">
         <div class="header">
-            <h1>Bienvenue chez CNPS ARENA</h1>
+            <h1>Bienvenue chez CNPS LODGE</h1>
             <p>Votre compte a été approuvé !</p>
         </div>
         <div class="content">
@@ -43,9 +43,9 @@
 
             <a href="{{ url('/login/user') }}" class="button">Se connecter</a>
             
-            <p style="margin-top: 30px; font-size: 14px; color: #6b7280;">
+            <p style="margin-top: 30px; font-size: 14px; color: #ffffff;">
                 Cordialement,<br>
-                <strong>L'équipe CNPS ARENA</strong>
+                <strong>L'équipe CNPS LODGE</strong>
             </p>
         </div>
     </div>

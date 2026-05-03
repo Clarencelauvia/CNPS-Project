@@ -16,7 +16,7 @@ return Application::configure(basePath: dirname(__DIR__))
     )
     ->withMiddleware(function (Middleware $middleware): void {
 
-       // Add CORS middleware globally
+       //  CORS middleware globally
         $middleware->append(HandleCors::class);
         
         // Or for API only
@@ -32,10 +32,10 @@ return Application::configure(basePath: dirname(__DIR__))
 
          // Configure CORS
         $middleware->api(prepend: [
-            HandleCors::class,
+            \Illuminate\Http\Middleware\HandleCors::class,
         ]);
 
-          // You can also customize CORS settings here
+        
         $middleware->trustHosts(at: [
             'localhost',
             '127.0.0.1',

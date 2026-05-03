@@ -22,14 +22,19 @@ class User extends Authenticatable
         'name',
         'email',
         'password',
-        'phone',
+        'telephone',
         'address',
         'user_type',
         'id_number',
         'approval_status',
         'rejection_reason',
         'approved_at',
-        'approved_by'
+        'approved_by',
+        'activated_at',
+        'activation_token',
+        'is_activated',
+        'has_completed_profile',
+        'status',
     ];
 
     /**
@@ -45,6 +50,9 @@ class User extends Authenticatable
     protected $casts = [
         'email_verified_at' => 'datetime',
         'approved_at' => 'datetime',
+        'activated_at' => 'datetime',
+        'is_activated' => 'boolean',
+        'has_completed_profile' => 'boolean',
     ];
 
     /**
@@ -84,4 +92,45 @@ class User extends Authenticatable
             'password' => 'hashed',
         ];
     }
+
+
+
+public function rentalContracts()
+{
+    return $this->hasMany(RentalContract::class);
+}
+
+public function activeRentalContract()
+{
+    return $this->hasOne(RentalContract::class)->where('status', 'active');
+}
+
+public function currentApartment()
+{
+   return $this->hasOne(Apartment::class, 'current_tenant_id');
+}
+
+public function isTenant()
+{
+    return $this->activeRentalContract()->exists();
+}
+
+
+// Get current appartment details
+public function getCurrentApartmentDetailsAttribute()
+{
+    if (!$this->currentApartment) {
+        return null;
+    }
+    
+    return [
+        'apartment_id' => $this->currentApartment->id,
+        'apartment_number' => $this->currentApartment->apartment_number,
+        'building_name' => $this->currentApartment->building->name,
+        'building_id' => $this->currentApartment->building->id,
+        'monthly_rent' => $this->currentApartment->rent_amount,
+        'move_in_date' => $this->currentApartment->activeContract?->start_date,
+    ];
+}
+
 }

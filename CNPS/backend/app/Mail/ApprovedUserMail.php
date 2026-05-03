@@ -21,7 +21,7 @@ class ApprovedUserMail extends Mailable
     public $password;
     public function __construct($user, $password)
     {
-        $this->users = $user;
+        $this->user = $user;
         $this->password = $password;
     }
 

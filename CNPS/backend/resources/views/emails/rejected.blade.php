@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Demande d'inscription - CNPS ARENA</title>
+    <title>Demande d'inscription - CNPS LODGE</title>
     <style>
         body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
         .container { max-width: 600px; margin: 0 auto; padding: 20px; }
@@ -36,7 +36,7 @@
             
             <p style="margin-top: 30px; font-size: 14px; color: #6b7280;">
                 Cordialement,<br>
-                <strong>L'équipe CNPS ARENA</strong>
+                <strong>L'équipe CNPS LODGE</strong>
             </p>
         </div>
     </div>
