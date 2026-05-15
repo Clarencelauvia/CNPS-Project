@@ -6,349 +6,535 @@ use App\Http\Controllers\Controller;
 use App\Models\User;
 use App\Models\Document;
 use App\Models\UserRegistrationRequest;
-use App\Mail\ApprovedUserMail;
-use App\Mail\RejectedUserMail;
-use App\Mail\DocumentRejectionMail;
+use App\Models\Appartment;
+use App\Mail\AccountCreationApprovedMail;
+use App\Mail\AccountCreationRejectedMail;
+use App\Mail\RentalRequestApprovedMail;
+use App\Mail\RentalRequestRejectedMail;
 use Illuminate\Http\Request;
+use App\Models\RentalRequest;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Log;
 
 class AdminRegistrationManagementController extends Controller
 {
-    // STEP 1: Get all pending registration requests (users who submitted demande location only)
-    public function pendingRegistrationRequests()
+    // ============ ACCOUNT CREATION REQUESTS (Step 1) ============
+    
+    public function pendingAccountCreations()
     {
-        $pendingUsers = User::with(['documents' => function($query) {
-                $query->where('type', 'demandeLocation');
-            }])
-            ->where('approval_status', 'pending')
-            ->where('is_activated', false)
-            ->orderBy('created_at', 'desc')
-            ->get();
+        try {
+            $pendingUsers = User::where('approval_status', 'pending')
+                ->where('is_activated', false)
+                ->orderBy('created_at', 'desc')
+                ->get();
 
-        return response()->json([
-            'pending_count' => $pendingUsers->count(),
-            'registrations' => $pendingUsers->map(function ($user) {
-                $demandeLocation = $user->documents->first();
-                return [
-                    'id' => $user->id,
-                    'name' => $user->name,
-                    'email' => $user->email,
-                    'phone' => $user->telephone,
-                    'id_number' => $user->id_number,
-                    'submitted_at' => $user->created_at,
-                    'demande_location' => $demandeLocation ? [
-                    'file_name' => $demandeLocation->file_name,
-                    'file_path' => Storage::url($demandeLocation->file_path),
-                    ] : null,
-                ];
-            })
-        ]);
-    }
-
-    // STEP 1: Get single registration request details
-    public function showRegistration($id)
-    {
-        $user = User::with(['documents' => function($query) {
-                $query->where('type', 'demandeLocation');
-            }])->findOrFail($id);
-
-        return response()->json([
-            'user' => [
-                'id' => $user->id,
-                'name' => $user->name,
-                'email' => $user->email,
-                'phone' => $user->telephone,
-                'id_number' => $user->id_number,
-                'submitted_at' => $user->created_at,
-                'approval_status' => $user->approval_status,
-            ],
-            'documents' => $user->documents->map(function ($doc) {
-                return [
-                    'id' => $doc->id,
-                    'type' => $this->getDocumentLabel($doc->type),
-                    'file_name' => $doc->file_name,
-                    'file_path' => Storage::url($doc->file_path),
-                    'file_size' => $doc->file_size,
-                    'uploaded_at' => $doc->created_at
-                ];
-            }),
-        ]);
-    }
-
-    // STEP 1: Approve user activation (send temp password via email)
-    public function approve(Request $request, $id)
-    {
-        $user = User::findOrFail($id);
-        
-        // Generate temporary password
-        $tempPassword = Str::random(10);
-        
-        // Update user status
-        $user->update([
-            'approval_status' => 'approved',
-            'is_activated' => true,
-            'approved_at' => now(),
-            'approved_by' => $request->user()->id,
-            'password' => Hash::make($tempPassword),
-            'status' => 'active'
-        ]);
-
-        // Update registration request status
-        if ($user->registrationRequest) {
-            $user->registrationRequest->update([
-                'status' => 'approved',
-                'reviewed_by' => $request->user()->id,
-                'reviewed_at' => now()
+            return response()->json([
+                'registrations' => $pendingUsers->map(function ($user) {
+                    $demandeLocation = Document::where('user_id', $user->id)
+                        ->where('type', 'demandeLocation')
+                        ->first();
+                        
+                    return [
+                        'id' => $user->id,
+                        'name' => $user->name,
+                        'email' => $user->email,
+                        'phone' => $user->telephone,
+                        'id_number' => $user->id_number,
+                        'submitted_at' => $user->created_at,
+                        'type' => 'account_creation',
+                        'status' => 'pending',
+                        'demande_location' => $demandeLocation ? [
+                            'file_name' => $demandeLocation->file_name,
+                            'file_path' => Storage::url($demandeLocation->file_path),
+                        ] : null,
+                    ];
+                })
             ]);
-        } 
-
-        // Update demande location document status
-        Document::where('user_id', $user->id)
-            ->where('type', 'demandeLocation')
-            ->update(['status' => 'approved']);
-
-        // Send activation email with temporary password
-        Mail::to($user->email)->send(new ApprovedUserMail($user, $tempPassword));
-
-        // Log activity
-        $request->user()->logActivity('approve_registration', $user->id, null, [
-            'user_email' => $user->email,
-            'user_name' => $user->name
-        ]);
-
-        return response()->json([
-            'message' => 'User activated successfully. Temporary credentials sent to user email.'
-        ]);
-    }
-
-    // STEP 1: Reject registration
-    public function reject(Request $request, $id)
-    {
-        $request->validate([
-            'reason' => 'required|string|max:500'
-        ]);
-
-        $user = User::findOrFail($id);
-
-        // Update user status
-        $user->update([
-            'approval_status' => 'rejected',
-            'approved_at' => now(), 
-            'approved_by' => $request->user()->id,  
-            'rejection_reason' => $request->reason
-        ]);
-
-        // Update registration request status
-        if ($user->registrationRequest) {
-            $user->registrationRequest->update([
-                'status' => 'rejected',
-                'reviewed_by' => $request->user()->id,
-                'reviewed_at' => now(),
-                'admin_notes' => $request->reason  
-            ]);
+        } catch (\Exception $e) {
+            Log::error('pendingAccountCreations error: ' . $e->getMessage());
+            return response()->json(['registrations' => []]);
         }
-
-        // Update documents status
-        Document::where('user_id', $user->id)->update(['status' => 'rejected']);
-
-        // Send rejection email
-        Mail::to($user->email)->send(new RejectedUserMail($user, $request->reason));
-
-        // Log activity
-        $request->user()->logActivity('reject_registration', $user->id, null, [
-            'user_email' => $user->email,
-            'user_name' => $user->name,
-            'rejection_reason' => $request->reason
-        ]);
-
-        return response()->json(['message' => 'User registration rejected successfully.']);
     }
 
-    // STEP 2: Get pending document submissions (users who completed profile)
-    public function pendingDocumentSubmissions()
+    public function approvedAccountCreations()
     {
-        $users = User::with(['documents' => function($query) {
-                $query->where('type', '!=', 'demandeLocation')
-                      ->where('status', 'pending');
-            }])
-            ->where('has_completed_profile', true)
-            ->whereHas('documents', function($query) {
-                $query->where('type', '!=', 'demandeLocation')
-                      ->where('status', 'pending');
-            })
-            ->orderBy('created_at', 'desc')
-            ->get();
+        try {
+            $approvedUsers = User::where('approval_status', 'approved')
+                ->where('is_activated', true)
+                ->orderBy('approved_at', 'desc')
+                ->get();
 
-        return response()->json([
-            'pending_count' => $users->count(),
-            'submissions' => $users->map(function ($user) {
-                return [
-                    'id' => $user->id,
-                    'name' => $user->name,
-                    'email' => $user->email,
-                    'user_type' => $user->user_type,
-                    'submitted_at' => $user->updated_at,
-                    'documents' => $user->documents->map(function ($doc) {
-                        return [
-                            'id' => $doc->id,
-                            'type' => $this->getDocumentLabel($doc->type),
-                            'file_name' => $doc->file_name,
-                            'file_path' => Storage::url($doc->file_path),
-                            'file_size' => $doc->file_size,
-                        ];
-                    }),
-                ];
-            })
-        ]);
+            return response()->json([
+                'registrations' => $approvedUsers->map(function ($user) {
+                    return [
+                        'id' => $user->id,
+                        'name' => $user->name,
+                        'email' => $user->email,
+                        'phone' => $user->telephone,
+                        'id_number' => $user->id_number,
+                        'submitted_at' => $user->created_at,
+                        'approved_at' => $user->approved_at,
+                        'type' => 'account_creation',
+                        'status' => 'approved',
+                    ];
+                })
+            ]);
+        } catch (\Exception $e) {
+            Log::error('approvedAccountCreations error: ' . $e->getMessage());
+            return response()->json(['registrations' => []]);
+        }
     }
 
-    // STEP 2: Get single document submission details
-    public function showDocumentSubmission($id)
+    public function rejectedAccountCreations()
     {
-        $user = User::with(['documents' => function($query) {
-                $query->where('type', '!=', 'demandeLocation');
-            }])->findOrFail($id);
+        try {
+            $rejectedUsers = User::where('approval_status', 'rejected')
+                ->orderBy('approved_at', 'desc')
+                ->get();
 
-        return response()->json([
-            'user' => [
-                'id' => $user->id,
-                'name' => $user->name,
-                'email' => $user->email,
-                'phone' => $user->telephone,
-                'id_number' => $user->id_number,
-                'user_type' => $user->user_type,
-            ],
-            'documents' => $user->documents->map(function ($doc) {
-                return [
-                    'id' => $doc->id,
-                    'type' => $this->getDocumentLabel($doc->type),
-                    'file_name' => $doc->file_name,
-                    'file_path' => Storage::url($doc->file_path),
-                    'file_size' => $doc->file_size,
-                    'status' => $doc->status,
-                    'uploaded_at' => $doc->created_at
-                ];
-            }),
-        ]);
+            return response()->json([
+                'registrations' => $rejectedUsers->map(function ($user) {
+                    return [
+                        'id' => $user->id,
+                        'name' => $user->name,
+                        'email' => $user->email,
+                        'phone' => $user->telephone,
+                        'id_number' => $user->id_number,
+                        'submitted_at' => $user->created_at,
+                        'rejected_at' => $user->approved_at,
+                        'rejection_reason' => $user->rejection_reason,
+                        'type' => 'account_creation',
+                        'status' => 'rejected',
+                    ];
+                })
+            ]);
+        } catch (\Exception $e) {
+            Log::error('rejectedAccountCreations error: ' . $e->getMessage());
+            return response()->json(['registrations' => []]);
+        }
     }
 
-    // STEP 2: Approve documents (user can now rent)
-    public function approveDocuments(Request $request, $id)
+    public function approveAccountCreation(Request $request, $id)
     {
-        $user = User::findOrFail($id);
+        try {
+            $user = User::findOrFail($id);
+            
+            $tempPassword = Str::random(10);
+            
+            $user->update([
+                'approval_status' => 'approved',
+                'is_activated' => true,
+                'approved_at' => now(),
+                'approved_by' => $request->user()->id,
+                'password' => Hash::make($tempPassword),
+                'status' => 'active'
+            ]);
 
-        // Update all pending documents to approved
-        Document::where('user_id', $user->id)
-            ->where('type', '!=', 'demandeLocation')
-            ->where('status', 'pending')
-            ->update(['status' => 'approved']);
+            Document::where('user_id', $user->id)
+                ->where('type', 'demandeLocation')
+                ->update(['status' => 'approved']);
 
-        // Log activity
-        $request->user()->logActivity('approve_documents', $user->id, null, [
-            'user_email' => $user->email,
-            'user_name' => $user->name
-        ]);
+            Mail::to($user->email)->send(new AccountCreationApprovedMail($user, $tempPassword));
 
-        return response()->json([
-            'message' => 'Documents approved successfully. User can now rent spaces.'
-        ]);
+            return response()->json([
+                'message' => 'Account created successfully. Temporary credentials sent to user email.'
+            ]);
+        } catch (\Exception $e) {
+            Log::error('approveAccountCreation error: ' . $e->getMessage());
+            return response()->json(['message' => 'Error: ' . $e->getMessage()], 500);
+        }
     }
 
-    // STEP 2: Reject documents
-    public function rejectDocuments(Request $request, $id)
+    public function rejectAccountCreation(Request $request, $id)
     {
-        $request->validate([
-            'reason' => 'required|string|max:500'
-        ]);
+        try {
+            $request->validate([
+                'reason' => 'required|string|max:500'
+            ]);
 
-        $user = User::findOrFail($id);
+            $user = User::findOrFail($id);
 
-        // Update all pending documents to rejected
-        Document::where('user_id', $user->id)
-            ->where('type', '!=', 'demandeLocation')
-            ->where('status', 'pending')
-            ->update([
-                'status' => 'rejected',
+            $user->update([
+                'approval_status' => 'rejected',
+                'approved_at' => now(), 
+                'approved_by' => $request->user()->id,  
                 'rejection_reason' => $request->reason
             ]);
 
-        // Send rejection email
-        Mail::to($user->email)->send(new DocumentRejectionMail($user, $request->reason));
+            Document::where('user_id', $user->id)->update(['status' => 'rejected']);
+            Mail::to($user->email)->send(new AccountCreationRejectedMail($user, $request->reason));
 
-        // Log activity
-        $request->user()->logActivity('reject_documents', $user->id, null, [
-            'user_email' => $user->email,
-            'user_name' => $user->name,
-            'rejection_reason' => $request->reason
-        ]);
-
-        return response()->json(['message' => 'Documents rejected successfully.']);
+            return response()->json(['message' => 'Account creation request rejected successfully.']);
+        } catch (\Exception $e) {
+            Log::error('rejectAccountCreation error: ' . $e->getMessage());
+            return response()->json(['message' => 'Error: ' . $e->getMessage()], 500);
+        }
     }
 
-public function downloadDocument($documentId)
+    // ============ RENTAL REQUESTS (Step 2) ============
+
+public function pendingRentalRequests()
 {
     try {
-        // Find the document
-        $document = Document::find($documentId);
+        $rentalRequests = RentalRequest::with(['user', 'apartment', 'building'])
+            ->where('status', 'pending')
+            ->orderBy('created_at', 'desc')
+            ->get();
         
-        if (!$document) {
-            \Log::error('Document not found in database:', ['document_id' => $documentId]);
-            return response()->json(['message' => 'Document not found in database'], 404);
-        }
-        
-        // Log document details
-        \Log::info('Document found:', [
-            'id' => $document->id,
-            'file_name' => $document->file_name,
-            'file_path' => $document->file_path,
-            'user_id' => $document->user_id,
-            'type' => $document->type
+        \Log::info('Fetched ' . $rentalRequests->count() . ' pending rental requests');
+
+        return response()->json([
+            'registrations' => $rentalRequests->map(function ($rentalRequest) {  // ← Fixed: use $rentalRequest
+                return [
+                    'id' => $rentalRequest->id,  // ← Fixed
+                    'name' => $rentalRequest->user->name,  // ← Fixed
+                    'email' => $rentalRequest->user->email,  // ← Fixed
+                    'phone' => $rentalRequest->user->telephone ?? 'Non renseigné',
+                    'id_number' => $rentalRequest->user->id_number ?? 'Non renseigné',
+                    'user_type' => $rentalRequest->user->user_type,
+                    'apartment' => $rentalRequest->apartment->apartment_number ?? 'N/A',
+                    'building' => $rentalRequest->building->name ?? 'N/A',
+                    'start_date' => $rentalRequest->start_date ? $rentalRequest->start_date->format('Y-m-d') : 'N/A',
+                    'duration' => $rentalRequest->duration,
+                    'message' => $rentalRequest->message,
+                    'submitted_at' => $rentalRequest->created_at,
+                    'type' => 'rental_request',
+                    'status' => 'pending',
+                ];
+            })
         ]);
-        
-        // Check storage disk configuration
-        $disk = Storage::disk('public');
-        $fullPath = storage_path('app/public/' . $document->file_path);
-        
-        \Log::info('Storage paths:', [
-            'disk_root' => $disk->path(''),
-            'relative_path' => $document->file_path,
-            'absolute_path' => $fullPath,
-            'file_exists_on_disk' => file_exists($fullPath),
-            'storage_exists_check' => $disk->exists($document->file_path)
-        ]);
-        
-        // Check if file exists
-        if (!$disk->exists($document->file_path)) {
-            \Log::error('File does not exist on disk:', [
-                'path' => $document->file_path,
-                'absolute_path' => $fullPath,
-                'directory_contents' => scandir(dirname($fullPath))
-            ]);
-            return response()->json([
-                'message' => 'File not found on server',
-                'path' => $document->file_path
-            ], 404);
-        }
-        
-        // Download the file
-        return $disk->download($document->file_path, $document->file_name);
-        
     } catch (\Exception $e) {
-        \Log::error('Exception in downloadDocument:', [
-            'message' => $e->getMessage(),
-            'trace' => $e->getTraceAsString()
-        ]);
-        return response()->json(['message' => 'Server error: ' . $e->getMessage()], 500);
+        \Log::error('pendingRentalRequests error: ' . $e->getMessage());
+        return response()->json(['registrations' => []]);
     }
 }
+
+public function approvedRentalRequests()
+{
+    try {
+        $rentalRequests = RentalRequest::with(['user', 'apartment', 'building'])
+            ->where('status', 'approved')
+            ->orderBy('reviewed_at', 'desc')
+            ->get();
+            
+        return response()->json([
+            'registrations' => $rentalRequests->map(function ($rentalRequest) {
+                return [
+                    'id' => $rentalRequest->id,
+                    'name' => $rentalRequest->user->name,
+                    'email' => $rentalRequest->user->email,
+                    'phone' => $rentalRequest->user->telephone ?? 'Non renseigné',
+                    'id_number' => $rentalRequest->user->id_number ?? 'Non renseigné',
+                    'user_type' => $rentalRequest->user->user_type,
+                    'apartment' => $rentalRequest->apartment->apartment_number ?? 'N/A',
+                    'building' => $rentalRequest->building->name ?? 'N/A',
+                    'submitted_at' => $rentalRequest->created_at,
+                    'reviewed_at' => $rentalRequest->reviewed_at,
+                    'type' => 'rental_request',
+                    'status' => 'approved',
+                ];
+            })
+        ]);
+    } catch (\Exception $e) {
+        \Log::error('approvedRentalRequests error: ' . $e->getMessage());
+        return response()->json(['registrations' => []]);
+    }
+}
+
+public function rejectedRentalRequests()
+{
+    try {
+        $rentalRequests = RentalRequest::with(['user', 'apartment', 'building'])
+            ->where('status', 'rejected')
+            ->orderBy('reviewed_at', 'desc')
+            ->get();
+
+        return response()->json([
+            'registrations' => $rentalRequests->map(function ($rentalRequest) {
+                return [
+                    'id' => $rentalRequest->id,
+                    'name' => $rentalRequest->user->name,
+                    'email' => $rentalRequest->user->email,
+                    'phone' => $rentalRequest->user->telephone ?? 'Non renseigné',
+                    'id_number' => $rentalRequest->user->id_number ?? 'Non renseigné',
+                    'user_type' => $rentalRequest->user->user_type,
+                    'apartment' => $rentalRequest->apartment->apartment_number ?? 'N/A',
+                    'building' => $rentalRequest->building->name ?? 'N/A',
+                    'submitted_at' => $rentalRequest->created_at,
+                    'reviewed_at' => $rentalRequest->reviewed_at,
+                    'rejection_reason' => $rentalRequest->admin_notes,
+                    'type' => 'rental_request',
+                    'status' => 'rejected',
+                ];
+            })
+        ]);
+    } catch (\Exception $e) {
+        \Log::error('rejectedRentalRequests error: ' . $e->getMessage());
+        return response()->json(['registrations' => []]);
+    }
+}
+
+    public function approveRentalRequest(Request $request, $id)
+    {
+        try {
+           $rentalRequest = RentalRequest::with(['user', 'apartment'])->findOrFail($id);
+
+        //    Update rental request status
+        $rentalRequest->update([
+            'status' => 'approved',
+            'reviewed_at' => now(),
+            'reviewed_by' => $request->user()->id,
+            'admin_notes' => $request->admin_notes ?? null
+        ]);
+
+        // Update document status for this rental request
+        if($rentalRequest->document_ids){
+            Document::whereIn('id', $rentalRequest->document_ids)
+                ->where('status', 'pending')
+                ->update(['status' => 'approved']);
+         
+        }
+        // Mark apartment as occupied
+        $apartment = Appartment::find($rentalRequest->apartment_id);
+        if ($apartment) {
+            $apartment->update(['is_occupied' => true]);}
+            return response()->json([
+                'message' => 'Rental request approved successfully. Apartment marked as occupied.'
+            ]);
+        } catch (\Exception $e) {
+            Log::error('approveRentalRequest error: ' . $e->getMessage());
+            return response()->json(['message' => 'Error: ' . $e->getMessage()], 500);
+        }
+    }
+
+    public function rejectRentalRequest(Request $request, $id)
+    {
+        try {
+            $request->validate([
+                'reason' => 'required|string|max:500'
+            ]);
+
+            $rentalRequest = RentalRequest::with(['user'])->findOrFail($id);
+            // Update rental request status
+            $rentalRequest->update([
+                'status' => 'rejected',
+                'reviewed_at' => now(),
+                'reviewed_by' => $request->user()->id,
+                'admin_notes' => $request->reason
+            ]);
+
+            // Update document status for this rental request
+            if($rentalRequest->document_ids){
+                Document::whereIn('id', $rentalRequest->document_ids)
+                    ->where('status', 'pending')
+                    ->update(['status' => 'rejected',
+                    'rejection_reason' => $request->reason
+                ]);
+            }
+
+            // Mail::to($user->email)->send(new RentalRequestRejectedMail($user, $request->reason));
+
+            return response()->json(['message' => 'Rental request rejected successfully.']);
+        } catch (\Exception $e) {
+            Log::error('rejectRentalRequest error: ' . $e->getMessage());
+            return response()->json(['message' => 'Error: ' . $e->getMessage()], 500);
+        }
+    }
+
+    // ============ SHARED METHODS ============
+
+    public function downloadDocument($documentId)
+    {
+        try {
+            $document = Document::findOrFail($documentId);
+            $disk = Storage::disk('public');
+            
+            if (!$disk->exists($document->file_path)) {
+                return response()->json(['message' => 'File not found'], 404);
+            }
+            
+            return $disk->download($document->file_path, $document->file_name);
+        } catch (\Exception $e) {
+            return response()->json(['message' => 'Server error: ' . $e->getMessage()], 500);
+        }
+    }
+public function pendingDocumentSubmissions()
+{
+    try {
+        // Get all pending documents with their rental request info
+        $documents = Document::with(['user', 'rentalRequest'])
+            ->where('status', 'pending')
+            ->orderBy('created_at', 'desc')
+            ->get();
+
+        return response()->json([
+            'documents' => $documents->map(function ($document) {
+                return [
+                    'id' => $document->id,
+                    'user_id' => $document->user->id,
+                    'user_name' => $document->user->name,
+                    'user_email' => $document->user->email,
+                    'rental_request_id' => $document->rental_request_id ?? null,
+                    'apartment_number' => $document->rentalRequest?->apartment?->apartment_number ?? 'N/A',
+                    'building_name' => $document->rentalRequest?->building?->name ?? 'N/A',
+                    'type' => $document->type,
+                    'type_label' => $this->getDocumentLabel($document->type),
+                    'file_name' => $document->file_name,
+                    'file_url' => $document->file_path ? Storage::url($document->file_path) : null,
+                    'submitted_at' => $document->created_at,
+                ];
+            })
+        ]);
+    } catch (\Exception $e) {
+        \Log::error('pendingDocumentSubmissions error: ' . $e->getMessage());
+        return response()->json(['documents' => []], 500);
+    }
+}
+
+public function showDocumentSubmission($id){
+    try {
+        $document = Document::with('user')->findOrFail($id);
+        return response()->json([
+            'id' => $document->id,
+            'user_name' => $document->user ->name,
+            'user_email' => $document->user->email,
+            'type' =>$document->type,
+            'type_label' => $this->getDocumentLabel($document->type),
+            'file_name' => $document->file_name,
+            'file_url' => Storage::url($document->file_path),
+            'submitted_at' => $document->created_at,
+            'status' => $document->status,
+        ]);
+    } catch (\Exception $e) {
+        \Log::error('showDocumentSubmission error: ' . $e->getMessage());
+        return response()->json(['message' => 'Document not found'], 404);
+    }
+}
+
+public function approveDocuments(Request $request, $id){
+    try {
+        $document = Document::findOrFail($id);
+        $document->update([
+            'status' => 'approved'
+        ]);
+        return response()->json(['message' => 'Document approved successfully.']);
+    } catch (\Exception $e) {
+        \Log::error('approveDocuments error: ' . $e->getMessage());
+        return response()->json(['message' => 'Error: ' . $e->getMessage()], 500);
+    }
+}
+public function rejectDocuments(Request $request, $id){
+    try {
+        $request->validate([
+            'reason' => 'required|string|max:500'
+        ]);
+
+        $document = Document::findOrFail($id);
+        $document->update([
+            'status' => 'rejected',
+            'rejection_reason' => $request->reason
+        ]);
+        return response()->json(['message' => 'Document rejected successfully.']);
+    } catch (\Exception $e) {
+        \Log::error('rejectDocuments error: ' . $e->getMessage());
+        return response()->json(['message' => 'Error: ' . $e->getMessage()], 500);
+    }
+}
+public function showRegistration($id)
+{
+    try {
+        // First try to find as RentalRequest
+        $rentalRequest = RentalRequest::with(['user', 'documents'])->find($id);
+        
+        if ($rentalRequest) {
+            // It's a rental request
+            $user = $rentalRequest->user;
+            $documents = $rentalRequest->documents;
+            
+            return response()->json([
+                'id' => $rentalRequest->id,
+                'name' => $user->name,
+                'email' => $user->email,
+                'phone' => $user->telephone,
+                'id_number' => $user->id_number,
+                'submitted_at' => $rentalRequest->created_at,
+                'approval_status' => $rentalRequest->status,
+                'user_type' => $user->user_type,
+                'type' => 'rental_request',
+                'apartment' => $rentalRequest->apartment ? $rentalRequest->apartment->apartment_number : 'N/A',
+                'building' => $rentalRequest->building ? $rentalRequest->building->name : 'N/A',
+                'start_date' => $rentalRequest->start_date,
+                'duration' => $rentalRequest->duration,
+                'message' => $rentalRequest->message,
+                'documents' => $documents->map(function ($doc) {
+                    return [
+                        'id' => $doc->id,
+                        'type' => $this->getDocumentLabel($doc->type),
+                        'file_name' => $doc->file_name,
+                        'file_path' => Storage::url($doc->file_path),
+                        'status' => $doc->status,
+                    ];
+                }),
+            ]);
+        }
+        
+        // If not found as rental request, try as user (account creation)
+        $user = User::with(['documents'])->findOrFail($id);
+        
+        return response()->json([
+            'id' => $user->id,
+            'name' => $user->name,
+            'email' => $user->email,
+            'phone' => $user->telephone,
+            'id_number' => $user->id_number,
+            'submitted_at' => $user->created_at,
+            'approval_status' => $user->approval_status,
+            'user_type' => $user->user_type,
+            'type' => 'account_creation',
+            'documents' => $user->documents->map(function ($doc) {
+                return [
+                    'id' => $doc->id,
+                    'type' => $this->getDocumentLabel($doc->type),
+                    'file_name' => $doc->file_name,
+                    'file_path' => Storage::url($doc->file_path),
+                    'status' => $doc->status,
+                ];
+            }),
+        ]);
+        
+    } catch (\Exception $e) {
+        \Log::error('showRegistration error: ' . $e->getMessage());
+        return response()->json(['message' => 'Request not found'], 404);
+    }
+}
+
+    public function deleteUser($id)
+    {
+        try {
+            $user = User::findOrFail($id);
+            
+            foreach ($user->documents as $document) {
+                if ($document->file_path && Storage::disk('public')->exists($document->file_path)) {
+                    Storage::disk('public')->delete($document->file_path);
+                }
+                $document->delete();
+            }
+            
+            $user->delete();
+            
+            return response()->json(['message' => 'User deleted successfully']);
+        } catch (\Exception $e) {
+            return response()->json(['message' => 'Error: ' . $e->getMessage()], 500);
+        }
+    }
 
     private function getDocumentLabel($type)
     {
         $labels = [
-            'demandeLocation' => 'Demande de location',
+            'demandeLocation' => 'Demande de création de compte',
             'preuveVersement' => 'Preuve de versement',
             'dossierFiscale' => 'Dossier fiscal',
             'dsfPrecedent' => 'DSF exercice précédent',
@@ -361,175 +547,10 @@ public function downloadDocument($documentId)
         return $labels[$type] ?? $type;
     }
 
-    // Get approved registrations
-public function approvedRegistrations()
-{
-    $approvedUsers = User::with(['documents' => function($query) {
-            $query->where('type', 'demandeLocation');
-        }])
-        ->where('approval_status', 'approved')
-        ->where('is_activated', true)
-        ->orderBy('approved_at', 'desc')
-        ->get();
-
-    return response()->json([
-        'registrations' => $approvedUsers->map(function ($user) {
-            $demandeLocation = $user->documents->first();
-            return [
-                'id' => $user->id,
-                'name' => $user->name,
-                'email' => $user->email,
-                'phone' => $user->telephone,
-                'id_number' => $user->id_number,
-                'status' => $user->status,
-                'submitted_at' => $user->created_at,
-                'approved_at' => $user->approved_at,
-                'demande_location' => $demandeLocation ? [
-                'file_name' => $demandeLocation->file_name,
-                'file_path' => Storage::url($demandeLocation->file_path),
-                ] : null,
-            ];
-        })
-    ]);
-}
-
-// Get rejected registrations
-public function rejectedRegistrations()
-{
-    $rejectedUsers = User::with(['documents' => function($query) {
-            $query->where('type', 'demandeLocation');
-        }])
-        ->where('approval_status', 'rejected')
-        ->orderBy('approved_at', 'desc')
-        ->get();
-
-    return response()->json([
-        'registrations' => $rejectedUsers->map(function ($user) {
-            $demandeLocation = $user->documents->first();
-            return [
-                'id' => $user->id,
-                'name' => $user->name,
-                'email' => $user->email,
-                'phone' => $user->telephone,
-                'id_number' => $user->id_number,
-                'status' => $user->status,
-                'submitted_at' => $user->created_at,
-                'rejected_at' => $user->approved_at,
-                'rejection_reason' => $user->rejection_reason,
-                'demande_location' => $demandeLocation ? [
-                    'file_name' => $demandeLocation->file_name,
-                    'file_path' => Storage::url($demandeLocation->file_path),
-                ] : null,
-            ];
-        })
-    ]);
-}
-
-// Delete user permanently
-public function deleteUser($id)
-{
-    $user = User::findOrFail($id);
-    
-    // Delete all user documents from storage
-    foreach ($user->documents as $document) {
-        if ($document->file_path && Storage::disk('public')->exists($document->file_path)) {
-            Storage::disk('public')->delete($document->file_path);
-        }
-        $document->delete();
-    }
-    
-    // Delete registration request if exists
-    if ($user->registrationRequest) {
-        $user->registrationRequest->delete();
-    }
-    
-    // Delete the user
-    $userName = $user->name;
-    $userEmail = $user->email;
-    $user->delete();
-    
-    // Log activity
-    if (auth()->user()) {
-        auth()->user()->logActivity('delete_user', null, null, [
-            'user_name' => $userName,
-            'user_email' => $userEmail
-        ]);
-    }
-    
-    return response()->json([
-        'message' => 'User deleted successfully'
-    ]);
-}
-
-// Toggle user suspend status
-public function toggleSuspend(Request $request, $id)
-{
-    $user = User::findOrFail($id);
-    
-    // Toggle between 'active' and 'suspended'
-    $newStatus = $user->status === 'active' ? 'suspended' : 'active';
-    
-    $user->update([
-        'status' => $newStatus
-    ]);
-    
-    // Log activity
-    $request->user()->logActivity('toggle_user_suspend', $user->id, null, [
-        'user_email' => $user->email,
-        'user_name' => $user->name,
-        'new_status' => $newStatus
-    ]);
-    
-    return response()->json([
-        'message' => $newStatus === 'suspended' ? 'User suspended successfully' : 'User reactivated successfully',
-        'status' => $newStatus
-    ]);
-}
-
-// Get all users with filters (for management)
-public function getAllUsers(Request $request)
-{
-    $query = User::query();
-    
-    // Filter by status
-    if ($request->has('status') && $request->status) {
-        $query->where('status', $request->status);
-    }
-    
-    // Filter by approval status
-    if ($request->has('approval_status') && $request->approval_status) {
-        $query->where('approval_status', $request->approval_status);
-    }
-    
-    // Search by name or email
-    if ($request->has('search') && $request->search) {
-        $search = '%' . $request->search . '%';
-        $query->where(function($q) use ($search) {
-            $q->where('name', 'like', $search)
-              ->orWhere('email', 'like', $search);
-        });
-    }
-    
-    $users = $query->orderBy('created_at', 'desc')->paginate(20);
-    
-    return response()->json([
-        'users' => $users->map(function ($user) {
-            return [
-                'id' => $user->id,
-                'name' => $user->name,
-                'email' => $user->email,
-                'phone' => $user->telephone,
-                'status' => $user->status,
-                'approval_status' => $user->approval_status,
-                'user_type' => $user->user_type,
-                'created_at' => $user->created_at,
-            ];
-        }),
-        'pagination' => [
-            'current_page' => $users->currentPage(),
-            'last_page' => $users->lastPage(),
-            'total' => $users->total()
-        ]
-    ]);
-}
+    // Legacy methods for backward compatibility
+    public function pendingRegistrationRequests() { return $this->pendingAccountCreations(); }
+    public function approvedRegistrations() { return $this->approvedAccountCreations(); }
+    public function rejectedRegistrations() { return $this->rejectedAccountCreations(); }
+    public function approve(Request $request, $id) { return $this->approveAccountCreation($request, $id); }
+    public function reject(Request $request, $id) { return $this->rejectAccountCreation($request, $id); }
 }

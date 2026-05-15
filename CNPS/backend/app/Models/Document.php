@@ -11,12 +11,14 @@ class Document extends Model
 
     protected $fillable = [
         'user_id',
+        'rental_request_id',
         'type',
         'file_path',
         'file_name',
         'mime_type',
         'file_size',
-        'status'
+        'status',
+        'rejection_reason',
     ];
 
         protected $casts = [
@@ -51,5 +53,10 @@ class Document extends Model
     public function isRejected()
     {
         return $this->status === 'rejected';
+    }
+
+    public function rentalRequest()
+    {
+        return $this->belongsTo(RentalRequest::class, 'rental_request_id');
     }
 }

@@ -5,7 +5,9 @@ namespace App\Http\Controllers\Admin;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\Building;
-use App\Models\Appartment;
+use App\Models\Appartment as Apartment;
+use App\Models\ParkingSpot;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\Log;
@@ -103,6 +105,30 @@ class BuildingController extends Controller
             }, $building->images) : [],
             'video_url' => $building->video_url,
             'status' => $building->status,
+            'apartments'=> $building->apartments->map(function($apartment){
+                return [
+                    'id' => $apartment->id,
+                    'apartment_number' => $apartment->appartment_number,
+                    'floor' => $apartment->floor,
+                    'rooms' => $apartment->rooms,
+                    'bathrooms' => $apartment->bathrooms,
+                    'surface_area' => $apartment->surface_area,
+                    'rent_amount' => $apartment->rent_amount,
+                    'is_occupied' => $apartment->is_occupied,
+                    'is_furnished' => $apartment->is_furnished,
+                    'description' => $apartment->description,
+                    'images' => $apartment->images ? array_map(function($image) {
+                        return Storage::url($image);
+                    }, $apartment->images) : [],
+                    'video_url' => $apartment->video_url ? Storage::url($apartment->video_url) : null,
+                    'current_tenant' => $apartment->currentTenant ? [
+                    'id' => $apartment->currentTenant->id,
+                    'name' => $apartment->currentTenant->name,
+                    'email' => $apartment->currentTenant->email,
+                    'phone' => $apartment->currentTenant->telephone,
+                ] : null,
+                ];
+            }),
             'created_by' => [
                 'id' => $building->creator ? $building->creator->id : null,
                 'name' => $building->creator ? $building->creator->name : null
@@ -353,8 +379,13 @@ public function toggleStatus(Request $request, $id)
     if (!$region) {
         return response()->json(['cities' => []]);
     }
-        $cities = Building::where('region', $region)->whereNotNull('city')
-        ->where('city', '!=', '')->select('city')->distinct()->pluck('city')->values();
+        $cities = Building::where('region', $region)
+        ->whereNotNull('city')
+        ->where('city', '!=', '')
+        ->select('city')
+        ->distinct()
+        ->pluck('city')
+        ->values();
         return response()->json(['cities' => $cities]);
     }
 
@@ -377,5 +408,459 @@ public function toggleStatus(Request $request, $id)
             
         return response()->json(['statistics' => $stats]);
     }
+
+    public function getBuildingDetails($id)
+    {
+          $building = Building::with(['apartments', 'parkingSpots', 'creator'])->findOrFail($id);
+
+          return response() ->json([
+            'building' => [
+            'id' => $building->id,
+            'name' => $building->name,
+            'region' => $building->region,
+            'city' => $building->city,
+            'address' => $building->address,
+            'total_floors' => $building->total_floors,
+            'total_parking_spots' => $building->total_parking_spots,
+    
+            'available_parking_spots' => $building->available_parking_spots,
+            'is_furnished' => $building->is_furnished,
+            'has_parking' => $building->has_parking,
+            'rent_price' => $building->rent_price,
+            'description' => $building->description,
+            'images' => $building->images ? array_map(function($image) {
+            
+            return Storage::url($image);
+            }, $building->images) : [],
+            'video_url' => $building->video_url ? Storage::url($building->video_url) : null,
+            'status' => $building->status,
+            'statistics' => $building->getStatistics(),
+            'floors_with_apartments' => $building->getFloorsWithApartments(),
+            'parking_spots' => $building->parkingSpots,
+            'created_at' => $building->created_at,
+        ]
+          ]);
+    }
+
+public function personalizeBuilding(Request $request, $id)
+{
+      // Debug: Log everything
+    \Log::info('Request Data:', $request->all());
+    \Log::info('Floor Configuration:', $request->floor_configuration ?? []);
+        // Test if building exists
+    $building = Building::find($id);
+    if (!$building) {
+        return response()->json(['message' => 'Building not found'], 404);
+    }
+
+       try {
+        $testApartment = new \App\Models\Appartment();
+        \Log::info('Apartment model loaded successfully');
+    } catch (\Exception $e) {
+        \Log::error('Apartment model failed to load: ' . $e->getMessage());
+        return response()->json(['message' => 'Model error: ' . $e->getMessage()], 500);
+    }
+    
+
+    try {
+
+    
+        Log::info('Starting personalizeBuilding', ['building_id' => $id, 'request_data' => $request->all()]);
+        
+        $building = Building::findOrFail($id);
+        
+        $validator = Validator::make($request->all(), [
+            'total_floors' => 'required|integer|min:1|max:50',
+            'floor_configuration' => 'required|array',
+            'floor_configuration.*.floor_number' => 'required|integer',
+            'floor_configuration.*.apartments_per_floor' => 'required|integer|min:0|max:20',
+            'floor_configuration.*.furnished_count' => 'required|integer|min:0',
+            'floor_configuration.*.unfurnished_count' => 'required|integer|min:0',
+            'total_parking_spots' => 'nullable|integer|min:0',
+            'parking_price' => 'nullable|numeric|min:0',
+        ]);
+        
+        if ($validator->fails()) {
+            Log::error('Validation failed', ['errors' => $validator->errors()->toArray()]);
+            return response()->json(['errors' => $validator->errors()], 422);
+        }
+        
+        // Delete existing apartments and parking spots
+        Log::info('Deleting existing apartments and parking spots');
+        $building->apartments()->delete();
+        $building->parkingSpots()->delete();
+        
+        $totalApartments = 0;
+        $totalFurnished = 0;
+        $totalUnfurnished = 0;
+        $minRentPrice = PHP_INT_MAX;
+        
+        // Create apartments based on floor configuration
+        foreach ($request->floor_configuration as $index => $floorConfig) {
+            Log::info('Processing floor', ['floor_config' => $floorConfig]);
+            
+            $floorNumber = $floorConfig['floor_number'];
+            $apartmentsPerFloor = $floorConfig['apartments_per_floor'];
+            $furnishedCount = $floorConfig['furnished_count'];
+            $unfurnishedCount = $floorConfig['unfurnished_count'];
+            
+            // Get prices - default to 0 if not provided
+            $furnishedPrice = $floorConfig['furnished_rent_price'] ?? 0;
+            $unfurnishedPrice = $floorConfig['unfurnished_rent_price'] ?? 0;
+            
+            // Validation: If there are furnished apartments, price must be > 0
+            if ($furnishedCount > 0 && $furnishedPrice <= 0) {
+                return response()->json([
+                    'message' => "For floor {$floorNumber}, furnished apartments require a rent price greater than 0"
+                ], 422);
+            }
+            
+            // Validation: If there are unfurnished apartments, price must be > 0
+            if ($unfurnishedCount > 0 && $unfurnishedPrice <= 0) {
+                return response()->json([
+                    'message' => "For floor {$floorNumber}, unfurnished apartments require a rent price greater than 0"
+                ], 422);
+            }
+            
+            if ($apartmentsPerFloor > 0 && $furnishedCount + $unfurnishedCount != $apartmentsPerFloor) {
+                Log::error('Validation failed for floor', [
+                    'floor' => $floorNumber,
+                    'apartments_per_floor' => $apartmentsPerFloor,
+                    'furnished_count' => $furnishedCount,
+                    'unfurnished_count' => $unfurnishedCount
+                ]);
+                return response()->json([
+                    'message' => "For floor {$floorNumber}, furnished_count + unfurnished_count must equal apartments_per_floor"
+                ], 422);
+            }
+            
+            $totalApartments += $apartmentsPerFloor;
+            $totalFurnished += $furnishedCount;
+            $totalUnfurnished += $unfurnishedCount;
+            
+            // Track min rent price for building (only consider prices > 0)
+            if ($apartmentsPerFloor > 0) {
+                $pricesToConsider = [];
+                if ($furnishedCount > 0 && $furnishedPrice > 0) {
+                    $pricesToConsider[] = $furnishedPrice;
+                }
+                if ($unfurnishedCount > 0 && $unfurnishedPrice > 0) {
+                    $pricesToConsider[] = $unfurnishedPrice;
+                }
+                if (!empty($pricesToConsider)) {
+                    $minRentPrice = min($minRentPrice, min($pricesToConsider));
+                }
+            }
+            
+            // Create furnished apartments
+            for ($i = 1; $i <= $furnishedCount; $i++) {
+                $apartmentNumber = $this->generateApartmentNumber($floorNumber, $i, $apartmentsPerFloor);
+                
+                try {
+                    $apartment = new Apartment();
+                    $apartment->building_id = $building->id;
+                    $apartment->appartment_number = $apartmentNumber;
+                    $apartment->floor = $floorNumber;
+                    $apartment->rooms = $floorConfig['rooms'] ?? 2;
+                    $apartment->bathrooms = $floorConfig['bathrooms'] ?? 1;
+                    $apartment->surface_area = $floorConfig['surface_area'] ?? 50;
+                    $apartment->rent_amount = $furnishedPrice;
+                    $apartment->is_furnished = true;
+                    $apartment->is_occupied = false;
+                    $apartment->status = 'available';
+                    $apartment->description = "Appartement meublé - Étage {$floorNumber}";
+                    $apartment->save();
+                    Log::info('Created furnished apartment', ['number' => $apartmentNumber]);
+                } catch (\Exception $e) {
+                    Log::error('Failed to create furnished apartment', ['error' => $e->getMessage()]);
+                    throw $e;
+                }
+            }
+            
+            // Create unfurnished apartments
+            for ($i = $furnishedCount + 1; $i <= $apartmentsPerFloor; $i++) {
+                $apartmentNumber = $this->generateApartmentNumber($floorNumber, $i, $apartmentsPerFloor);
+                
+                try {
+                    $apartment = new Apartment();
+                    $apartment->building_id = $building->id;
+                    $apartment->appartment_number = $apartmentNumber;
+                    $apartment->floor = $floorNumber;
+                    $apartment->rooms = $floorConfig['rooms'] ?? 2;
+                    $apartment->bathrooms = $floorConfig['bathrooms'] ?? 1;
+                    $apartment->surface_area = $floorConfig['surface_area'] ?? 50;
+                    $apartment->rent_amount = $unfurnishedPrice;
+                    $apartment->is_furnished = false;
+                    $apartment->is_occupied = false;
+                    $apartment->status = 'available';
+                    $apartment->description = "Appartement non meublé - Étage {$floorNumber}";
+                    $apartment->save();
+                    Log::info('Created unfurnished apartment', ['number' => $apartmentNumber]);
+                } catch (\Exception $e) {
+                    Log::error('Failed to create unfurnished apartment', ['error' => $e->getMessage()]);
+                    throw $e;
+                }
+            }
+        }
+        
+        // Create parking spots (only if total parking spots > 0)
+        $parkingPrice = $request->parking_price ?? 50000;
+        $totalParkingSpots = $request->total_parking_spots ?? 0;
+        
+        for ($i = 1; $i <= $totalParkingSpots; $i++) {
+            try {
+                $parkingSpot = new ParkingSpot();
+                $parkingSpot->building_id = $building->id;
+                $parkingSpot->spot_number = "P-{$i}";
+                $parkingSpot->type = $request->input('parking_type', 'open');
+                $parkingSpot->monthly_price = $parkingPrice;
+                $parkingSpot->is_occupied = false;
+                $parkingSpot->status = 'available';
+                $parkingSpot->save();
+                Log::info('Created parking spot', ['spot' => "P-{$i}"]);
+            } catch (\Exception $e) {
+                Log::error('Failed to create parking spot', ['error' => $e->getMessage()]);
+                throw $e;
+            }
+        }
+        
+        // Set minRentPrice to 0 if no valid prices were found
+        if ($minRentPrice === PHP_INT_MAX) {
+            $minRentPrice = 0;
+        }
+        
+        // Update building
+        $updateData = [
+            'total_floors' => $request->total_floors,
+            'total_parking_spots' => $totalParkingSpots,
+            'available_parking_spots' => $totalParkingSpots, // ADD THIS
+            'total_appartments' => $totalApartments,
+            'available_appartments' => $totalApartments,
+            'rent_price' => $minRentPrice,
+            'is_furnished' => $totalFurnished > 0,
+            'has_parking' => $totalParkingSpots > 0,
+            'floor_configuration' => $request->floor_configuration
+        ];
+        
+        Log::info('Updating building', $updateData);
+        $building->update($updateData);
+        
+        return response()->json([
+            'message' => 'Building personalized successfully',
+            'building' => $building->fresh(['apartments', 'parkingSpots'])
+        ]);
+        
+    } catch (\Exception $e) {
+        Log::error('Personalize building failed', [
+            'building_id' => $id,
+            'error' => $e->getMessage(),
+            'trace' => $e->getTraceAsString()
+        ]);
+        
+        return response()->json([
+            'message' => 'An error occurred while personalizing the building',
+            'error' => $e->getMessage()
+        ], 500);
+    }
+}
+   
+
+
+    private function generateApartmentNumber($floor, $position, $totalPerFloor)
+    {
+        // Format: F{floor}AP{position} (e.g., F1AP01)
+    return sprintf("E%dAP%02d", $floor, $position);
+    }
+
+    public function updateAppartmentPrice(Request $request, $buildingId, $appartmentId)
+    {
+
+     $apartment = Apartment::findOrFail($apartmentId);
+    
+    $validator = Validator::make($request->all(), [
+        'rent_amount' => 'required|numeric|min:0',
+        'furnished_rent_price' => 'nullable|numeric|min:0',
+        'unfurnished_rent_price' => 'nullable|numeric|min:0'
+    ]);
+        if ($validator->fails()) {
+        return response()->json(['errors' => $validator->errors()], 422);
+    }
+    
+    $apartment->update($request->only([
+        'rent_amount', 'furnished_rent_price', 'unfurnished_rent_price'
+    ]));
+
+        // Update building's min rent price
+    $building = Building::find($buildingId);
+    $minRent = $building->apartments()->min('rent_amount');
+    $building->update(['rent_price' => $minRent]);
+    
+    return response()->json([
+        'message' => 'Apartment price updated successfully',
+        'apartment' => $apartment
+    ]);
+
+    }
+
+    public function bulkUpdateParkingPrices(Request $request, $buildingId)
+{
+    $validator = Validator::make($request->all(), [
+        'price' => 'required|numeric|min:0'
+    ]);
+    
+    $building = Building::findOrFail($buildingId);
+    $building->parkingSpots()->update(['monthly_price' => $request->price]);
+    
+    return response()->json([
+        'message' => 'All parking spot prices updated successfully'
+    ]);
+}
+
+public function uploadApartmentVideo(Request $request, $buildingId)
+{
+    try {
+        \Log::info('=== UPLOAD APARTMENT VIDEO DEBUG ===');
+        \Log::info('Building ID: ' . $buildingId);
+        \Log::info('Request all: ' . json_encode($request->all()));
+        \Log::info('Has file video: ' . $request->hasFile('video'));
+        \Log::info('Apartment number: ' . $request->apartment_number);
+        
+        $request->validate([
+            'apartment_number' => 'required|string',
+            'video' => 'required|file|mimes:mp4,mov,avi,mkv,webm|max:204800',
+        ]);
+        
+        // Find the apartment
+        $apartment = \App\Models\Appartment::where('building_id', $buildingId)
+            ->where('appartment_number', $request->apartment_number)
+            ->first();
+        
+        \Log::info('Apartment found: ' . ($apartment ? 'Yes' : 'No'));
+        if ($apartment) {
+            \Log::info('Apartment ID: ' . $apartment->id);
+            \Log::info('Apartment number: ' . $apartment->appartment_number);
+        }
+        
+        if (!$apartment) {
+            \Log::error('Apartment not found!');
+            return response()->json(['message' => 'Apartment not found'], 404);
+        }
+        
+        // Delete old video if exists
+        if ($apartment->video_url) {
+            \Log::info('Deleting old video: ' . $apartment->video_url);
+            Storage::disk('public')->delete($apartment->video_url);
+        }
+        
+        // Upload new video
+        $video = $request->file('video');
+        $videoPath = $video->store('apartments/' . date('Y/m/d') . '/videos', 'public');
+        \Log::info('Video saved at: ' . $videoPath);
+        
+        // Update apartment
+        $apartment->update(['video_url' => $videoPath]);
+        \Log::info('Apartment updated with video_url: ' . $videoPath);
+        
+        return response()->json([
+            'message' => 'Video uploaded successfully',
+            'video_url' => Storage::url($videoPath),
+            'apartment_id' => $apartment->id
+        ]);
+        
+    } catch (\Exception $e) {
+        \Log::error('Upload apartment video error: ' . $e->getMessage());
+        return response()->json(['message' => 'Error: ' . $e->getMessage()], 500);
+    }
+}
+
+
+   // Public index for users (no auth)
+public function publicIndex(Request $request)
+{
+    $query = Building::where('status', 'active');
+    
+    if($request->has('region') && $request->region){
+        $query->where('region', $request->region);
+    }
+    if($request->has('city') && $request->city){
+        $query->where('city', $request->city);
+    }
+    if($request->has('min_rent') && $request->min_rent){
+        $query->where('rent_price', '>=', $request->min_rent);
+    }
+    if($request->has('max_rent') && $request->max_rent){
+        $query->where('rent_price', '<=', $request->max_rent);
+    }
+    
+    $buildings = $query->orderBy('created_at', 'desc')->get();
+    
+    return response()->json([
+        'buildings' => $buildings->map(function($building){
+            return [
+                'id' => $building->id,
+                'name' => $building->name,
+                'region' => $building->region,
+                'city' => $building->city,
+                'address' => $building->address,
+                'is_furnished' => $building->is_furnished,
+                'has_parking' => $building->has_parking,
+                'total_appartments' => $building->total_appartments,
+                'available_appartments' => $building->available_appartments,
+                'rent_price' => $building->rent_price,
+                'description' => $building->description,
+                'images' => $building->images ? array_map(function($image) {
+                    return Storage::url($image);
+                }, $building->images) : [],
+                'video_url' => $building->video_url ? Storage::url($building->video_url) : null,
+                'status' => $building->status,
+            ];
+        }),
+    ]);
+}
+
+// Public show for users
+public function publicShow($id)
+{
+    $building = Building::with('apartments')->findOrFail($id);
+    
+    return response()->json([
+        'id' => $building->id,
+        'name' => $building->name,
+        'region' => $building->region,
+        'city' => $building->city,
+        'address' => $building->address,
+        'is_furnished' => $building->is_furnished,
+        'has_parking' => $building->has_parking,
+        'total_appartments' => $building->total_appartments,
+        'available_appartments' => $building->available_appartments,
+        'rent_price' => $building->rent_price,
+        'description' => $building->description,
+        'images' => $building->images ? array_map(function($image) {
+            return Storage::url($image);
+        }, $building->images) : [],
+        'video_url' => $building->video_url ? Storage::url($building->video_url) : null,
+        'apartments' => $building->apartments->map(function($apartment) {
+            return [
+                'id' => $apartment->id,
+                'apartment_number' => $apartment->appartment_number,
+                'floor' => $apartment->floor,
+                'rooms' => $apartment->rooms,
+                'bathrooms' => $apartment->bathrooms,
+                'surface_area' => $apartment->surface_area,
+                'rent_amount' => $apartment->rent_amount,
+                'is_occupied' => $apartment->is_occupied,
+                'is_furnished' => $apartment->is_furnished,
+                'description' => $apartment->description,
+                'video_url' => $apartment->video_url ? Storage::url($apartment->video_url) : null,
+                'images' => $apartment->images ? array_map(function($image) {
+                    return Storage::url($image);
+                }, $apartment->images) : [],
+            ];
+        }),
+    ]);
+}
+
+
+
 }
 

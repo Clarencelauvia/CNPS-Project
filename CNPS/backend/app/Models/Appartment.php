@@ -10,9 +10,11 @@ class Appartment extends Model
 {
     use HasFactory;
 
+    protected $table = 'appartments';
+
     protected $fillable = [
         'building_id',
-        'apartment_number',
+        'appartment_number',
         'floor',
         'rooms',
         'bathrooms',
@@ -23,7 +25,7 @@ class Appartment extends Model
         'description',
         'images',
         'video_url',
-        'current_tenant_id',  
+        'current_tenant_id',
         'status'
     ];
 
@@ -35,36 +37,29 @@ class Appartment extends Model
         'images' => 'array',
     ];
 
-    // Relationships
     public function building()
     {
         return $this->belongsTo(Building::class);
     }
 
-    // Direct relationship to current tenant
     public function currentTenant()
     {
         return $this->belongsTo(User::class, 'current_tenant_id');
     }
 
-    // Rental history (all contracts including past)
     public function rentalContracts()
     {
         return $this->hasMany(RentalContract::class);
     }
 
-    // Active rental contract
     public function activeContract()
     {
         return $this->hasOne(RentalContract::class)->where('status', 'active');
     }
 
-    // Accessors
     public function getImageUrlsAttribute()
     {
-        if (!$this->images) {
-            return [];
-        }
+        if (!$this->images) return [];
         return array_map(function($image) {
             return Storage::url($image);
         }, $this->images);
@@ -77,9 +72,7 @@ class Appartment extends Model
 
     public function getTenantInfoAttribute()
     {
-        if (!$this->current_tenant_id || !$this->currentTenant) {
-            return null;
-        }
+        if (!$this->current_tenant_id || !$this->currentTenant) return null;
         
         return [
             'id' => $this->currentTenant->id,
@@ -91,7 +84,6 @@ class Appartment extends Model
         ];
     }
 
-    // Helper methods
     public function isAvailable()
     {
         return !$this->is_occupied && $this->status === 'available';
@@ -99,14 +91,12 @@ class Appartment extends Model
 
     public function assignTenant(User $tenant, $startDate = null, $endDate = null)
     {
-        // Update apartment
         $this->update([
             'current_tenant_id' => $tenant->id,
             'is_occupied' => true,
             'status' => 'occupied'
         ]);
         
-        // Create rental contract for history
         $contract = RentalContract::create([
             'user_id' => $tenant->id,
             'apartment_id' => $this->id,
@@ -116,7 +106,6 @@ class Appartment extends Model
             'status' => 'active',
         ]);
         
-        // Update building availability
         $this->building->updateAvailabilityCount();
         
         return $contract;
@@ -124,7 +113,6 @@ class Appartment extends Model
 
     public function removeTenant($terminationReason = null)
     {
-        // Get active contract
         $activeContract = $this->activeContract;
         
         if ($activeContract) {
@@ -135,16 +123,19 @@ class Appartment extends Model
             ]);
         }
         
-        // Clear tenant from apartment
         $this->update([
             'current_tenant_id' => null,
             'is_occupied' => false,
             'status' => 'available'
         ]);
         
-        // Update building availability
         $this->building->updateAvailabilityCount();
         
         return true;
     }
+
+    public function getApartmentNumberAttribute()
+{
+    return $this->appartment_number;
+}
 }

@@ -79,11 +79,19 @@ class UserController extends Controller
             ], 403);
         }
 
+        // Delete old tokens and create new one
         $user->tokens()->delete();
         $token = $user->createToken('user-token')->plainTextToken;
 
         return response()->json([
-            'user' => $user,
+            'user' => [
+                'id' => $user->id,
+                'name' => $user->name,
+                'email' => $user->email,
+                'phone' => $user->telephone,
+                'approval_status' => $user->approval_status,
+                'has_completed_profile' => $user->has_completed_profile,
+            ],
             'token' => $token,
             'needs_profile_completion' => !$user->has_completed_profile
         ]);
